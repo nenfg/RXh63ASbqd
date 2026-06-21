@@ -1,6 +1,6 @@
---// Perfect Hit + 65% Power + Auto-Mine Radius | Module for LO Hub
+--// Perfect Hit + 65% Power + Auto-Mine Click | Module for LO Hub
 --// PlaceId: 12196278347
---// Dependencies: Fluent GUI (from LO Hub)
+--// Fixed: SetContent→SetDesc, Auto-mine via mouse simulation, 65% power
 
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -82,7 +82,6 @@ local function equipPickaxe()
     local humanoid = char:FindFirstChild("Humanoid")
     if not humanoid then return false end
 
-    -- Check if already equipped
     if getEquippedPickaxe() then return true end
 
     for _, child in ipairs(backpack:GetChildren()) do
@@ -99,7 +98,6 @@ end
 local function getHittablePart(oreModel)
     if not oreModel then return nil end
 
-    -- Look for Hittable folder
     local hittable = oreModel:FindFirstChild("Hittable")
     if hittable then
         for _, child in ipairs(hittable:GetChildren()) do
@@ -109,13 +107,11 @@ local function getHittablePart(oreModel)
         end
     end
 
-    -- Fallback: Hitbox
     local hitbox = oreModel:FindFirstChild("Hitbox")
     if hitbox and hitbox:IsA("BasePart") then
         return hitbox
     end
 
-    -- Fallback: any BasePart in model
     for _, child in ipairs(oreModel:GetDescendants()) do
         if child:IsA("BasePart") then
             return child
@@ -133,7 +129,7 @@ local function isPowerLimitedOre(oreName, parentName)
            oreName:find("voltshard") or parentName:find("voltshard")
 end
 
---// Send Perfect Hit
+--// Send Perfect Hit (with 65% power limit)
 local function sendPerfectHit(targetOre, alpha, responseTime)
     alpha = alpha or Module.normalAlpha
     responseTime = responseTime or Module.normalResponseTime
@@ -173,23 +169,61 @@ local function sendCharge(targetOre, alpha)
     end)
 end
 
---// Get Ore Position (for teleport)
+--// Get Ore Position
 local function getOrePosition(oreModel)
     local hittable = getHittablePart(oreModel)
     if hittable then return hittable.Position end
-
-    -- Fallback to PrimaryPart or any part
-    if oreModel.PrimaryPart then
-        return oreModel.PrimaryPart.Position
-    end
-
+    if oreModel.PrimaryPart then return oreModel.PrimaryPart.Position end
     for _, child in ipairs(oreModel:GetDescendants()) do
-        if child:IsA("BasePart") then
-            return child.Position
+        if child:IsA("BasePart") then return child.Position end
+    end
+    return nil
+end
+
+--// MOUSE SIMULATION: Click on ore
+local function simulateClickOnOre(orePart)
+    if not orePart or not orePart.Parent then return false end
+
+    local camera = workspace.CurrentCamera
+    if not camera then return false end
+
+    -- Get screen position of ore
+    local worldPos = orePart.Position
+    local screenPos, onScreen = camera:WorldToViewportPoint(worldPos)
+    if not onScreen then
+        -- Ore not on screen, try to look at it
+        local char = player.Character
+        local hrp = char and char:FindFirstChild("HumanoidRootPart")
+        if hrp then
+            hrp.CFrame = CFrame.new(hrp.Position, Vector3.new(worldPos.X, hrp.Position.Y, worldPos.Z))
+            task.wait(0.1)
+            screenPos, onScreen = camera:WorldToViewportPoint(worldPos)
         end
+        if not onScreen then return false end
     end
 
-    return nil
+    local mousePos = Vector2.new(screenPos.X, screenPos.Y)
+
+    -- Move mouse to ore
+    pcall(function()
+        VirtualInputManager:SendMouseMoveEvent(mousePos.X, mousePos.Y, game)
+    end)
+    task.wait(0.05)
+
+    -- Mouse down
+    pcall(function()
+        VirtualInputManager:SendMouseButtonEvent(mousePos.X, mousePos.Y, 0, true, game, 0)
+    end)
+    task.wait(0.05)
+
+    -- Mouse up
+    pcall(function()
+        VirtualInputManager:SendMouseButtonEvent(mousePos.X, mousePos.Y, 0, false, game, 0)
+    end)
+    task.wait(0.05)
+
+    addLog("Clicked ore at " .. math.floor(mousePos.X) .. "," .. math.floor(mousePos.Y), Color3.fromRGB(0, 255, 200))
+    return true
 end
 
 --// Find Ores in Radius
@@ -203,7 +237,6 @@ local function findOresInRadius(radius)
     local found = {}
     local playerPos = hrp.Position
 
-    -- Scan WorldSpawn/Ores
     local worldSpawn = workspace:FindFirstChild("WorldSpawn")
     if worldSpawn then
         local oresFolder = worldSpawn:FindFirstChild("Ores")
@@ -227,7 +260,6 @@ local function findOresInRadius(radius)
             end
         end
 
-        -- Trees
         local treesFolder = worldSpawn:FindFirstChild("Trees")
         if treesFolder then
             for _, tree in ipairs(treesFolder:GetChildren()) do
@@ -251,12 +283,11 @@ local function findOresInRadius(radius)
         end
     end
 
-    -- Sort by distance (closest first)
     table.sort(found, function(a, b) return a.distance < b.distance end)
     return found
 end
 
---// Mine Single Ore
+--// Mine Single Ore via MOUSE SIMULATION
 local function mineOre(oreData)
     if Module.isMining then return false end
     Module.isMining = true
@@ -288,16 +319,14 @@ local function mineOre(oreData)
     end
     task.wait(0.3)
 
-    -- Calculate position (stand below ore for Diamond/Emerald, normal for others)
+    -- Calculate position
     local orePos = hittablePart.Position
     local oreName = oreData.name:lower()
     local targetPos = orePos
 
     if oreName:find("diamond") or oreName:find("emerald") or oreName:find("pink") then
         targetPos = orePos - Vector3.new(0, 8, 0)
-        addLog("Mining from below: " .. oreData.name, Color3.fromRGB(255, 150, 0))
     else
-        -- Stand at normal distance
         local direction = (hrp.Position - orePos)
         if direction.Magnitude < 0.1 then direction = Vector3.new(1, 0, 0) end
         direction = direction.Unit
@@ -310,7 +339,7 @@ local function mineOre(oreData)
     hrp.CFrame = CFrame.new(targetPos, orePos)
     task.wait(0.3)
 
-    -- Determine alpha based on ore type
+    -- Determine alpha (65% for Blastshard/Voltshard)
     local alpha = Module.normalAlpha
     local responseTime = Module.normalResponseTime
 
@@ -320,7 +349,7 @@ local function mineOre(oreData)
         addLog("65% power for " .. oreData.name, Color3.fromRGB(150, 0, 255))
     end
 
-    -- Start mining loop
+    -- MAIN MINING LOOP: Mouse click + charge + attack
     local startTime = os.clock()
     local hits = 0
     local maxHits = 30
@@ -338,9 +367,14 @@ local function mineOre(oreData)
             task.wait(0.1)
         end
 
-        -- Send charge + attack
+        -- STEP 1: Simulate mouse click on ore (this triggers the mining animation)
+        simulateClickOnOre(hittablePart)
+
+        -- STEP 2: Send charge (for power)
         sendCharge(hittablePart, alpha)
         task.wait(0.1)
+
+        -- STEP 3: Send attack with perfect timing
         sendPerfectHit(hittablePart, alpha, responseTime)
 
         hits = hits + 1
@@ -385,7 +419,6 @@ local function startAutoMine()
                 continue
             end
 
-            -- Find ores in radius
             local ores = findOresInRadius(Module.mineRadius)
             if #ores == 0 then
                 addLog("No ores in " .. Module.mineRadius .. " studs", Color3.fromRGB(255, 150, 0))
@@ -395,7 +428,6 @@ local function startAutoMine()
 
             addLog("Found " .. #ores .. " ores nearby", Color3.fromRGB(0, 255, 150))
 
-            -- Mine closest ore
             local success = mineOre(ores[1])
             if success then
                 task.wait(0.5)
@@ -421,7 +453,6 @@ if delayBarEvent and delayBarEvent:IsA("RemoteEvent") then
         if not data then return end
 
         if data.ActionType == "Timed" then
-            -- Check current target for power limit
             local alpha = Module.normalAlpha
             local responseTime = Module.normalResponseTime
 
@@ -446,7 +477,7 @@ player.CharacterAdded:Connect(function(newChar)
     addLog("Character respawned", Color3.fromRGB(200, 200, 200))
 end)
 
---// GUI Integration (for LO Hub)
+--// GUI Integration (for LO Hub) - FIXED: SetContent -> SetDesc
 function Module.CreateGUI(parent)
     local tab = parent:AddTab({ Title = "Perfect Mine", Icon = "pickaxe" })
 
@@ -537,24 +568,24 @@ function Module.CreateGUI(parent)
         Module.mineInterval = value
     end)
 
-    -- Status Display
+    -- Status Display - FIXED: SetContent -> SetDesc
     local statusLabel = tab:AddParagraph({
         Title = "Status",
         Content = "Idle"
     })
 
-    -- Logs Display
+    -- Logs Display - FIXED: SetContent -> SetDesc
     local logsLabel = tab:AddParagraph({
         Title = "Logs",
         Content = "No logs yet"
     })
 
-    -- Update status loop
+    -- Update status loop - FIXED
     task.spawn(function()
         while true do
             task.wait(0.5)
             if not Module.enabled then
-                statusLabel:SetContent("Module disabled")
+                statusLabel:SetDesc("Module disabled")
                 continue
             end
 
@@ -567,9 +598,9 @@ function Module.CreateGUI(parent)
                 status = "Ready - " .. (Module.perfectEnabled and "100% hit ON" or "Manual") 
                     .. " - " .. (Module.powerLimitEnabled and "65% limit ON" or "No limit")
             end
-            statusLabel:SetContent(status)
+            statusLabel:SetDesc(status)
 
-            -- Update logs
+            -- Update logs - FIXED
             local logText = ""
             for i = math.max(1, #Module.logs - 4), #Module.logs do
                 local log = Module.logs[i]
@@ -578,7 +609,7 @@ function Module.CreateGUI(parent)
                 end
             end
             if logText == "" then logText = "No logs yet" end
-            logsLabel:SetContent(logText)
+            logsLabel:SetDesc(logText)
         end
     end)
 
@@ -649,5 +680,6 @@ _G.PerfectMineModule = Module
 
 addLog("Perfect Mine Module loaded", Color3.fromRGB(0, 255, 200))
 addLog("Remotes: Charge, Attack, DelayBar", Color3.fromRGB(200, 200, 200))
+addLog("Auto-mine: Mouse simulation enabled", Color3.fromRGB(0, 255, 150))
 
 return Module
