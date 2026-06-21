@@ -1,47 +1,34 @@
---// Perfect Hit + 65% Power + Auto-Mine Click | Module for LO Hub
+--// Perfect Hit + 65% Power + Auto-Mine | Module for LO Hub
 --// PlaceId: 12196278347
---// Fixed: SetContent→SetDesc, Auto-mine via mouse simulation, 65% power
+--// ZERO external dependencies - hub provides everything
 
-local Players = game:GetService("Players")
-local ReplicatedStorage = game:GetService("ReplicatedStorage")
-local RunService = game:GetService("RunService")
-local UserInputService = game:GetService("UserInputService")
-local TweenService = game:GetService("TweenService")
-local VirtualInputManager = game:GetService("VirtualInputManager")
+local Module = {}
 
-local player = Players.LocalPlayer
-local character = player.Character or player.CharacterAdded:Wait()
-local humanoid = character:WaitForChild("Humanoid")
-local hrp = character:WaitForChild("HumanoidRootPart")
+--// State (hub will inject these via Setup)
+Module.enabled = false
+Module.perfectEnabled = true
+Module.powerLimitEnabled = true
+Module.autoMineEnabled = false
+Module.mineRadius = 10
+Module.mineInterval = 0.4
+Module.mineTimeout = 15
+Module.blastshardLimit = 0.65
+Module.connections = {}
+Module.activeOres = {}
+Module.isMining = false
+Module.currentTarget = nil
+Module.logs = {}
 
---// Remote Events
-local Events = ReplicatedStorage:WaitForChild("Events")
-local ToolsEvents = Events:WaitForChild("Tools")
-local chargeEvent = ToolsEvents:WaitForChild("Charge")
-local attackEvent = ToolsEvents:WaitForChild("Attack")
-local delayBarEvent = ToolsEvents:WaitForChild("DelayBar")
+--// Hub-injected references (set by Setup)
+Module.Hub = nil        -- Hub window/table
+Module.Services = nil   -- {Players, RS, RunService, etc}
+Module.Remotes = nil    -- {Charge, Attack, DelayBar}
+Module.Player = nil     -- LocalPlayer
+Module.Character = nil  -- Current character
+Module.HRP = nil        -- HumanoidRootPart
+Module.Humanoid = nil   -- Humanoid
 
---// Module State
-local Module = {
-    enabled = false,
-    perfectEnabled = true,
-    powerLimitEnabled = true,
-    autoMineEnabled = false,
-    mineRadius = 10,
-    mineInterval = 0.4,
-    mineTimeout = 15,
-    blastshardLimit = 0.65,
-    voltshardLimit = 0.65,
-    normalAlpha = 1,
-    normalResponseTime = 0.76456,
-    connections = {},
-    activeOres = {},
-    isMining = false,
-    currentTarget = nil,
-    logs = {}
-}
-
---// Utility Functions
+--// Utility
 local function trackConnection(conn)
     if conn then table.insert(Module.connections, conn) end
     return conn
@@ -61,11 +48,24 @@ local function addLog(text, color)
     if Module.onLog then Module.onLog(text, color) end
 end
 
+--// Setup - called by hub with all dependencies
+function Module.Setup(hub, services, remotes, player, char, hrp, humanoid)
+    Module.Hub = hub
+    Module.Services = services
+    Module.Remotes = remotes
+    Module.Player = player
+    Module.Character = char
+    Module.HRP = hrp
+    Module.Humanoid = humanoid
+
+    addLog("Module setup complete", Color3.fromRGB(0, 255, 200))
+    return Module
+end
+
 --// Get Equipped Pickaxe
 local function getEquippedPickaxe()
-    local char = player.Character
-    if not char then return nil end
-    for _, child in ipairs(char:GetChildren()) do
+    if not Module.Character then return nil end
+    for _, child in ipairs(Module.Character:GetChildren()) do
         if child:IsA("Tool") and (child.Name:find("Pickaxe") or child:GetAttribute("ToolType") == "Pickaxe") then
             return child
         end
@@ -75,11 +75,10 @@ end
 
 --// Equip Pickaxe from Backpack
 local function equipPickaxe()
-    local char = player.Character
-    if not char then return false end
-    local backpack = player:FindFirstChild("Backpack")
+    if not Module.Character then return false end
+    local backpack = Module.Player:FindFirstChild("Backpack")
     if not backpack then return false end
-    local humanoid = char:FindFirstChild("Humanoid")
+    local humanoid = Module.Character:FindFirstChild("Humanoid")
     if not humanoid then return false end
 
     if getEquippedPickaxe() then return true end
@@ -101,72 +100,18 @@ local function getHittablePart(oreModel)
     local hittable = oreModel:FindFirstChild("Hittable")
     if hittable then
         for _, child in ipairs(hittable:GetChildren()) do
-            if child:IsA("BasePart") then
-                return child
-            end
+            if child:IsA("BasePart") then return child end
         end
     end
 
     local hitbox = oreModel:FindFirstChild("Hitbox")
-    if hitbox and hitbox:IsA("BasePart") then
-        return hitbox
-    end
+    if hitbox and hitbox:IsA("BasePart") then return hitbox end
 
     for _, child in ipairs(oreModel:GetDescendants()) do
-        if child:IsA("BasePart") then
-            return child
-        end
+        if child:IsA("BasePart") then return child end
     end
 
     return nil
-end
-
---// Check if Ore is Blastshard/Voltshard
-local function isPowerLimitedOre(oreName, parentName)
-    oreName = (oreName or ""):lower()
-    parentName = (parentName or ""):lower()
-    return oreName:find("blastshard") or parentName:find("blastshard") or
-           oreName:find("voltshard") or parentName:find("voltshard")
-end
-
---// Send Perfect Hit (with 65% power limit)
-local function sendPerfectHit(targetOre, alpha, responseTime)
-    alpha = alpha or Module.normalAlpha
-    responseTime = responseTime or Module.normalResponseTime
-
-    if not attackEvent then 
-        addLog("Attack event not found!", Color3.fromRGB(255, 50, 50))
-        return 
-    end
-
-    pcall(function()
-        attackEvent:FireServer({
-            Alpha = alpha,
-            ResponseTime = responseTime,
-            AnimSpeed = 1,
-            DamageMultiplier = 1,
-            Target = targetOre,
-            HitPosition = targetOre and targetOre.CFrame or CFrame.new()
-        })
-    end)
-end
-
---// Send Charge (for mining initiation)
-local function sendCharge(targetOre, alpha)
-    alpha = alpha or Module.normalAlpha
-
-    if not chargeEvent then
-        addLog("Charge event not found!", Color3.fromRGB(255, 50, 50))
-        return
-    end
-
-    pcall(function()
-        chargeEvent:FireServer({
-            HitPosition = targetOre and targetOre.CFrame or CFrame.new(),
-            Target = targetOre,
-            Alpha = alpha
-        })
-    end)
 end
 
 --// Get Ore Position
@@ -180,103 +125,126 @@ local function getOrePosition(oreModel)
     return nil
 end
 
+--// Send Perfect Hit - 65% FOR ALL ORES
+local function sendPerfectHit(targetOre)
+    if not Module.Remotes or not Module.Remotes.Attack then
+        addLog("Attack remote not found!", Color3.fromRGB(255, 50, 50))
+        return
+    end
+
+    -- ALWAYS 65% for everything
+    local alpha = Module.blastshardLimit
+    local responseTime = 0.76456
+
+    pcall(function()
+        Module.Remotes.Attack:FireServer({
+            Alpha = alpha,
+            ResponseTime = responseTime,
+            AnimSpeed = 1,
+            DamageMultiplier = 1,
+            Target = targetOre,
+            HitPosition = targetOre and targetOre.CFrame or CFrame.new()
+        })
+    end)
+end
+
+--// Send Charge
+local function sendCharge(targetOre)
+    if not Module.Remotes or not Module.Remotes.Charge then
+        addLog("Charge remote not found!", Color3.fromRGB(255, 50, 50))
+        return
+    end
+
+    pcall(function()
+        Module.Remotes.Charge:FireServer({
+            HitPosition = targetOre and targetOre.CFrame or CFrame.new(),
+            Target = targetOre,
+            Alpha = Module.blastshardLimit -- 65% for all
+        })
+    end)
+end
+
 --// MOUSE SIMULATION: Click on ore
 local function simulateClickOnOre(orePart)
     if not orePart or not orePart.Parent then return false end
+    if not Module.Services or not Module.Services.VirtualInputManager then return false end
 
+    local vim = Module.Services.VirtualInputManager
     local camera = workspace.CurrentCamera
     if not camera then return false end
 
-    -- Get screen position of ore
     local worldPos = orePart.Position
     local screenPos, onScreen = camera:WorldToViewportPoint(worldPos)
-    if not onScreen then
-        -- Ore not on screen, try to look at it
-        local char = player.Character
-        local hrp = char and char:FindFirstChild("HumanoidRootPart")
-        if hrp then
-            hrp.CFrame = CFrame.new(hrp.Position, Vector3.new(worldPos.X, hrp.Position.Y, worldPos.Z))
-            task.wait(0.1)
-            screenPos, onScreen = camera:WorldToViewportPoint(worldPos)
-        end
-        if not onScreen then return false end
-    end
+    if not onScreen then return false end
 
     local mousePos = Vector2.new(screenPos.X, screenPos.Y)
 
-    -- Move mouse to ore
     pcall(function()
-        VirtualInputManager:SendMouseMoveEvent(mousePos.X, mousePos.Y, game)
+        vim:SendMouseMoveEvent(mousePos.X, mousePos.Y, game)
     end)
     task.wait(0.05)
 
-    -- Mouse down
     pcall(function()
-        VirtualInputManager:SendMouseButtonEvent(mousePos.X, mousePos.Y, 0, true, game, 0)
+        vim:SendMouseButtonEvent(mousePos.X, mousePos.Y, 0, true, game, 0)
     end)
     task.wait(0.05)
 
-    -- Mouse up
     pcall(function()
-        VirtualInputManager:SendMouseButtonEvent(mousePos.X, mousePos.Y, 0, false, game, 0)
+        vim:SendMouseButtonEvent(mousePos.X, mousePos.Y, 0, false, game, 0)
     end)
     task.wait(0.05)
 
-    addLog("Clicked ore at " .. math.floor(mousePos.X) .. "," .. math.floor(mousePos.Y), Color3.fromRGB(0, 255, 200))
     return true
 end
 
 --// Find Ores in Radius
 local function findOresInRadius(radius)
     radius = radius or Module.mineRadius
-    local char = player.Character
-    if not char then return {} end
-    local hrp = char:FindFirstChild("HumanoidRootPart")
-    if not hrp then return {} end
+    if not Module.HRP then return {} end
 
     local found = {}
-    local playerPos = hrp.Position
+    local playerPos = Module.HRP.Position
 
     local worldSpawn = workspace:FindFirstChild("WorldSpawn")
-    if worldSpawn then
-        local oresFolder = worldSpawn:FindFirstChild("Ores")
-        if oresFolder then
-            for _, ore in ipairs(oresFolder:GetChildren()) do
-                if ore.Name ~= "_Decoration" then
-                    local pos = getOrePosition(ore)
-                    if pos then
-                        local dist = (playerPos - pos).Magnitude
-                        if dist <= radius then
-                            table.insert(found, {
-                                model = ore,
-                                part = getHittablePart(ore),
-                                position = pos,
-                                distance = dist,
-                                name = ore.Name
-                            })
-                        end
+    if not worldSpawn then return {} end
+
+    local oresFolder = worldSpawn:FindFirstChild("Ores")
+    if oresFolder then
+        for _, ore in ipairs(oresFolder:GetChildren()) do
+            if ore.Name ~= "_Decoration" then
+                local pos = getOrePosition(ore)
+                if pos then
+                    local dist = (playerPos - pos).Magnitude
+                    if dist <= radius then
+                        table.insert(found, {
+                            model = ore,
+                            part = getHittablePart(ore),
+                            position = pos,
+                            distance = dist,
+                            name = ore.Name
+                        })
                     end
                 end
             end
         end
+    end
 
-        local treesFolder = worldSpawn:FindFirstChild("Trees")
-        if treesFolder then
-            for _, tree in ipairs(treesFolder:GetChildren()) do
-                if tree.Name ~= "_Decoration" then
-                    local pos = getOrePosition(tree)
-                    if pos then
-                        local dist = (playerPos - pos).Magnitude
-                        if dist <= radius then
-                            table.insert(found, {
-                                model = tree,
-                                part = getHittablePart(tree),
-                                position = pos,
-                                distance = dist,
-                                name = tree.Name,
-                                isTree = true
-                            })
-                        end
+    local treesFolder = worldSpawn:FindFirstChild("Trees")
+    if treesFolder then
+        for _, tree in ipairs(treesFolder:GetChildren()) do
+            if tree.Name ~= "_Decoration" then
+                local pos = getOrePosition(tree)
+                if pos then
+                    local dist = (playerPos - pos).Magnitude
+                    if dist <= radius then
+                        table.insert(found, {
+                            model = tree,
+                            part = getHittablePart(tree),
+                            position = pos,
+                            distance = dist,
+                            name = tree.Name,
+                            isTree = true
+                        })
                     end
                 end
             end
@@ -287,21 +255,15 @@ local function findOresInRadius(radius)
     return found
 end
 
---// Mine Single Ore via MOUSE SIMULATION
+--// Mine Single Ore
 local function mineOre(oreData)
     if Module.isMining then return false end
     Module.isMining = true
     Module.currentTarget = oreData
 
-    local char = player.Character
-    if not char then 
+    if not Module.Character or not Module.HRP then
         Module.isMining = false
-        return false 
-    end
-    local hrp = char:FindFirstChild("HumanoidRootPart")
-    if not hrp then 
-        Module.isMining = false
-        return false 
+        return false
     end
 
     local oreModel = oreData.model
@@ -311,7 +273,6 @@ local function mineOre(oreData)
         return false
     end
 
-    -- Equip pickaxe
     if not equipPickaxe() then
         addLog("No pickaxe found!", Color3.fromRGB(255, 50, 50))
         Module.isMining = false
@@ -319,80 +280,50 @@ local function mineOre(oreData)
     end
     task.wait(0.3)
 
-    -- Calculate position
     local orePos = hittablePart.Position
-    local oreName = oreData.name:lower()
     local targetPos = orePos
 
-    if oreName:find("diamond") or oreName:find("emerald") or oreName:find("pink") then
-        targetPos = orePos - Vector3.new(0, 8, 0)
-    else
-        local direction = (hrp.Position - orePos)
-        if direction.Magnitude < 0.1 then direction = Vector3.new(1, 0, 0) end
-        direction = direction.Unit
-        local standDistance = math.max(hittablePart.Size.X, hittablePart.Size.Z, 3) + 3
-        targetPos = orePos + direction * standDistance
-        targetPos = Vector3.new(targetPos.X, orePos.Y + 2, targetPos.Z)
-    end
+    local direction = (Module.HRP.Position - orePos)
+    if direction.Magnitude < 0.1 then direction = Vector3.new(1, 0, 0) end
+    direction = direction.Unit
+    local standDistance = math.max(hittablePart.Size.X, hittablePart.Size.Z, 3) + 3
+    targetPos = orePos + direction * standDistance
+    targetPos = Vector3.new(targetPos.X, orePos.Y + 2, targetPos.Z)
 
-    -- Teleport to ore
-    hrp.CFrame = CFrame.new(targetPos, orePos)
+    Module.HRP.CFrame = CFrame.new(targetPos, orePos)
     task.wait(0.3)
 
-    -- Determine alpha (65% for Blastshard/Voltshard)
-    local alpha = Module.normalAlpha
-    local responseTime = Module.normalResponseTime
+    -- ALWAYS 65% for ALL ores
+    addLog("Mining: " .. oreData.name .. " (65% power)", Color3.fromRGB(150, 0, 255))
 
-    if Module.powerLimitEnabled and isPowerLimitedOre(oreData.name, oreModel.Name) then
-        alpha = Module.blastshardLimit
-        responseTime = Module.voltshardLimit
-        addLog("65% power for " .. oreData.name, Color3.fromRGB(150, 0, 255))
-    end
-
-    -- MAIN MINING LOOP: Mouse click + charge + attack
     local startTime = os.clock()
     local hits = 0
     local maxHits = 30
 
-    addLog("Mining: " .. oreData.name .. " (" .. math.floor(oreData.distance) .. "m)", Color3.fromRGB(0, 255, 200))
+    while oreModel and oreModel:IsDescendantOf(workspace)
+        and hittablePart and hittablePart.Parent
+        and os.clock() - startTime < Module.mineTimeout
+        and hits < maxHits do
 
-    while oreModel and oreModel:IsDescendantOf(workspace) 
-          and hittablePart and hittablePart.Parent
-          and os.clock() - startTime < Module.mineTimeout 
-          and hits < maxHits do
-
-        -- Maintain position
-        if (hrp.Position - targetPos).Magnitude > 5 then
-            hrp.CFrame = CFrame.new(targetPos, orePos)
+        if (Module.HRP.Position - targetPos).Magnitude > 5 then
+            Module.HRP.CFrame = CFrame.new(targetPos, orePos)
             task.wait(0.1)
         end
 
-        -- STEP 1: Simulate mouse click on ore (this triggers the mining animation)
         simulateClickOnOre(hittablePart)
-
-        -- STEP 2: Send charge (for power)
-        sendCharge(hittablePart, alpha)
+        sendCharge(hittablePart)
         task.wait(0.1)
-
-        -- STEP 3: Send attack with perfect timing
-        sendPerfectHit(hittablePart, alpha, responseTime)
+        sendPerfectHit(hittablePart)
 
         hits = hits + 1
         task.wait(Module.mineInterval)
 
-        -- Check if ore destroyed
         if not hittablePart or not hittablePart.Parent then
             addLog("Mined! " .. oreData.name .. " (" .. hits .. " hits)", Color3.fromRGB(0, 255, 100))
             Module.isMining = false
             Module.currentTarget = nil
             return true
         end
-    end
-
-    if hits >= maxHits then
-        addLog("Max hits reached for " .. oreData.name, Color3.fromRGB(255, 150, 0))
-    else
-        addLog("Timeout mining " .. oreData.name, Color3.fromRGB(255, 150, 0))
     end
 
     Module.isMining = false
@@ -403,9 +334,8 @@ end
 --// Auto-Mine Loop
 local function startAutoMine()
     if Module.autoMineLoop then return end
-
     Module.autoMineLoop = true
-    addLog("Auto-mine started (radius: " .. Module.mineRadius .. ")", Color3.fromRGB(0, 255, 200))
+    addLog("Auto-mine started (65% power, radius: " .. Module.mineRadius .. ")", Color3.fromRGB(0, 255, 200))
 
     task.spawn(function()
         while Module.autoMineLoop and Module.enabled do
@@ -421,21 +351,13 @@ local function startAutoMine()
 
             local ores = findOresInRadius(Module.mineRadius)
             if #ores == 0 then
-                addLog("No ores in " .. Module.mineRadius .. " studs", Color3.fromRGB(255, 150, 0))
                 task.wait(1)
                 continue
             end
 
-            addLog("Found " .. #ores .. " ores nearby", Color3.fromRGB(0, 255, 150))
-
             local success = mineOre(ores[1])
-            if success then
-                task.wait(0.5)
-            else
-                task.wait(1)
-            end
+            if success then task.wait(0.5) else task.wait(1) end
         end
-
         addLog("Auto-mine stopped", Color3.fromRGB(255, 100, 100))
     end)
 end
@@ -447,86 +369,83 @@ local function stopAutoMine()
 end
 
 --// Perfect Hit Handler (from DelayBar)
-if delayBarEvent and delayBarEvent:IsA("RemoteEvent") then
-    trackConnection(delayBarEvent.OnClientEvent:Connect(function(data, extra)
+function Module.SetupDelayBarHandler()
+    if not Module.Remotes or not Module.Remotes.DelayBar then return end
+
+    trackConnection(Module.Remotes.DelayBar.OnClientEvent:Connect(function(data)
         if not Module.enabled or not Module.perfectEnabled then return end
         if not data then return end
 
         if data.ActionType == "Timed" then
-            local alpha = Module.normalAlpha
-            local responseTime = Module.normalResponseTime
-
-            if Module.currentTarget and Module.powerLimitEnabled then
-                if isPowerLimitedOre(Module.currentTarget.name, Module.currentTarget.model.Name) then
-                    alpha = Module.blastshardLimit
-                    responseTime = Module.voltshardLimit
-                end
-            end
-
-            sendPerfectHit(nil, alpha, responseTime)
-            addLog("Perfect hit! Alpha: " .. alpha, Color3.fromRGB(0, 255, 100))
+            -- ALWAYS 65% for everything
+            sendPerfectHit(nil)
+            addLog("Perfect hit! 65% power", Color3.fromRGB(0, 255, 100))
         end
     end))
 end
 
 --// Character Respawn Handler
-player.CharacterAdded:Connect(function(newChar)
-    character = newChar
-    humanoid = newChar:WaitForChild("Humanoid")
-    hrp = newChar:WaitForChild("HumanoidRootPart")
-    addLog("Character respawned", Color3.fromRGB(200, 200, 200))
-end)
+function Module.SetupCharacterHandler()
+    if not Module.Player then return end
 
---// GUI Integration (for LO Hub) - FIXED: SetContent -> SetDesc
-function Module.CreateGUI(parent)
-    local tab = parent:AddTab({ Title = "Perfect Mine", Icon = "pickaxe" })
+    trackConnection(Module.Player.CharacterAdded:Connect(function(newChar)
+        Module.Character = newChar
+        Module.Humanoid = newChar:WaitForChild("Humanoid")
+        Module.HRP = newChar:WaitForChild("HumanoidRootPart")
+        addLog("Character respawned", Color3.fromRGB(200, 200, 200))
+    end))
+end
+
+--// GUI Integration - ONLY depends on hub Window
+function Module.CreateGUI(hubWindow)
+    local tab = hubWindow:AddTab({ Title = "Perfect Mine", Icon = "pickaxe" })
+
+    tab:AddParagraph({
+        Title = "Perfect Mine",
+        Content = "100% hit rate | 65% power for ALL ores"
+    })
 
     -- Enable Toggle
     local enableToggle = tab:AddToggle("PerfectMineEnabled", {
         Title = "Enable Module",
-        Description = "Master switch for perfect mining",
+        Description = "Master switch",
         Default = false
     })
 
     enableToggle:OnChanged(function()
         Module.enabled = enableToggle.Value
-        if Module.enabled then
-            addLog("Module enabled", Color3.fromRGB(0, 255, 200))
-        else
-            stopAutoMine()
-            addLog("Module disabled", Color3.fromRGB(255, 100, 100))
-        end
+        if not Module.enabled then stopAutoMine() end
+        addLog(Module.enabled and "Module enabled" or "Module disabled", 
+            Module.enabled and Color3.fromRGB(0, 255, 200) or Color3.fromRGB(255, 100, 100))
     end)
 
     -- Perfect Hit Toggle
     local perfectToggle = tab:AddToggle("PerfectHit", {
         Title = "100% Perfect Hit",
-        Description = "Always hit perfect timing",
+        Description = "Always perfect timing",
         Default = true
     })
 
     perfectToggle:OnChanged(function()
         Module.perfectEnabled = perfectToggle.Value
-        addLog("Perfect hit: " .. (Module.perfectEnabled and "ON" or "OFF"), 
-            Module.perfectEnabled and Color3.fromRGB(0, 255, 200) or Color3.fromRGB(255, 100, 100))
     end)
 
-    -- 65% Power Limit Toggle
-    local powerLimitToggle = tab:AddToggle("PowerLimit", {
-        Title = "65% Power Limit",
-        Description = "Limit power for Blastshard/Voltshard",
+    -- 65% Power Toggle
+    local powerToggle = tab:AddToggle("PowerLimit", {
+        Title = "65% Power",
+        Description = "Limit power to 65% for ALL ores",
         Default = true
     })
 
-    powerLimitToggle:OnChanged(function()
-        Module.powerLimitEnabled = powerLimitToggle.Value
-        addLog("Power limit: " .. (Module.powerLimitEnabled and "ON" or "OFF"),
+    powerToggle:OnChanged(function()
+        Module.powerLimitEnabled = powerToggle.Value
+        addLog("65% power: " .. (Module.powerLimitEnabled and "ON" or "OFF"),
             Module.powerLimitEnabled and Color3.fromRGB(150, 0, 255) or Color3.fromRGB(255, 100, 100))
     end)
 
     -- Auto-Mine Toggle
     local autoMineToggle = tab:AddToggle("AutoMine", {
-        Title = "Auto-Mine Radius",
+        Title = "Auto-Mine",
         Description = "Automatically mine ores in radius",
         Default = false
     })
@@ -541,122 +460,88 @@ function Module.CreateGUI(parent)
     end)
 
     -- Radius Slider
-    local radiusSlider = tab:AddSlider("MineRadius", {
+    tab:AddSlider("MineRadius", {
         Title = "Mine Radius",
-        Description = "Radius to scan for ores (studs)",
+        Description = "Scan radius (studs)",
         Default = 10,
         Min = 5,
         Max = 50,
-        Rounding = 0
+        Rounding = 0,
+        Callback = function(v) Module.mineRadius = v end
     })
 
-    radiusSlider:OnChanged(function(value)
-        Module.mineRadius = value
-    end)
-
     -- Interval Slider
-    local intervalSlider = tab:AddSlider("MineInterval", {
+    tab:AddSlider("MineInterval", {
         Title = "Hit Interval",
         Description = "Seconds between hits",
         Default = 0.4,
         Min = 0.1,
         Max = 2,
-        Rounding = 2
+        Rounding = 2,
+        Callback = function(v) Module.mineInterval = v end
     })
 
-    intervalSlider:OnChanged(function(value)
-        Module.mineInterval = value
-    end)
-
-    -- Status Display - FIXED: SetContent -> SetDesc
+    -- Status
     local statusLabel = tab:AddParagraph({
         Title = "Status",
         Content = "Idle"
     })
 
-    -- Logs Display - FIXED: SetContent -> SetDesc
+    -- Logs
     local logsLabel = tab:AddParagraph({
         Title = "Logs",
         Content = "No logs yet"
     })
 
-    -- Update status loop - FIXED
+    -- Update loop
     task.spawn(function()
         while true do
             task.wait(0.5)
             if not Module.enabled then
-                statusLabel:SetDesc("Module disabled")
+                statusLabel:SetDesc("Disabled")
                 continue
             end
 
-            local status = ""
-            if Module.isMining then
-                status = "Mining: " .. (Module.currentTarget and Module.currentTarget.name or "Unknown")
-            elseif Module.autoMineEnabled then
-                status = "Auto-mine active (" .. Module.mineRadius .. " studs)"
-            else
-                status = "Ready - " .. (Module.perfectEnabled and "100% hit ON" or "Manual") 
-                    .. " - " .. (Module.powerLimitEnabled and "65% limit ON" or "No limit")
-            end
+            local status = Module.isMining and ("Mining: " .. (Module.currentTarget and Module.currentTarget.name or "..."))
+                or (Module.autoMineEnabled and "Auto-mine (" .. Module.mineRadius .. " studs)" 
+                or ("Ready | 65%: " .. (Module.powerLimitEnabled and "ON" or "OFF")))
             statusLabel:SetDesc(status)
 
-            -- Update logs - FIXED
             local logText = ""
             for i = math.max(1, #Module.logs - 4), #Module.logs do
                 local log = Module.logs[i]
                 if log then
-                    logText = logText .. "[" .. string.format("%.1f", log.time % 100) .. "] " .. log.text .. "\n"
+                    logText = logText .. "[" .. string.format("%.1f", log.time % 100) .. "] " .. log.text .. "
+"
                 end
             end
-            if logText == "" then logText = "No logs yet" end
-            logsLabel:SetDesc(logText)
+            logsLabel:SetDesc(logText ~= "" and logText or "No logs yet")
         end
     end)
 
     -- Manual Mine Button
     tab:AddButton({
-        Title = "Mine Nearest Ore",
-        Description = "Manually mine closest ore in radius",
+        Title = "Mine Nearest",
+        Description = "Mine closest ore in radius",
         Callback = function()
-            if not Module.enabled then
-                addLog("Enable module first!", Color3.fromRGB(255, 100, 100))
-                return
-            end
-
+            if not Module.enabled then addLog("Enable first!", Color3.fromRGB(255, 100, 100)); return end
             local ores = findOresInRadius(Module.mineRadius)
-            if #ores == 0 then
-                addLog("No ores found!", Color3.fromRGB(255, 100, 100))
-                return
-            end
-
-            task.spawn(function()
-                mineOre(ores[1])
-            end)
+            if #ores == 0 then addLog("No ores!", Color3.fromRGB(255, 100, 100)); return end
+            task.spawn(function() mineOre(ores[1]) end)
         end
     })
 
     -- Mine All Button
     tab:AddButton({
-        Title = "Mine All in Radius",
-        Description = "Mine all ores in radius one by one",
+        Title = "Mine All",
+        Description = "Mine all ores in radius",
         Callback = function()
-            if not Module.enabled then
-                addLog("Enable module first!", Color3.fromRGB(255, 100, 100))
-                return
-            end
-
+            if not Module.enabled then addLog("Enable first!", Color3.fromRGB(255, 100, 100)); return end
             task.spawn(function()
                 while Module.enabled do
                     local ores = findOresInRadius(Module.mineRadius)
-                    if #ores == 0 then
-                        addLog("All ores mined!", Color3.fromRGB(0, 255, 100))
-                        break
-                    end
-
-                    local success = mineOre(ores[1])
-                    if not success then
-                        task.wait(1)
-                    end
+                    if #ores == 0 then addLog("Done!", Color3.fromRGB(0, 255, 100)); break end
+                    if not mineOre(ores[1]) then task.wait(1) end
                     task.wait(0.5)
                 end
             end)
@@ -676,10 +561,7 @@ function Module.Destroy()
 end
 
 --// Export
-_G.PerfectMineModule = Module
-
-addLog("Perfect Mine Module loaded", Color3.fromRGB(0, 255, 200))
-addLog("Remotes: Charge, Attack, DelayBar", Color3.fromRGB(200, 200, 200))
-addLog("Auto-mine: Mouse simulation enabled", Color3.fromRGB(0, 255, 150))
+addLog("Perfect Mine Module loaded (65% for ALL ores)", Color3.fromRGB(0, 255, 200))
+addLog("Zero dependencies - requires hub Setup()", Color3.fromRGB(200, 200, 200))
 
 return Module
